@@ -13,6 +13,19 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors()); // Permite que o Frontend acesse o Backend
 app.use(express.json()); // Permite ler JSON no corpo das requisições
 
+// --- CORREÇÃO DO CORS AQUI ---
+// Permite que a Vercel acesse seu Backend
+app.use(cors({
+    origin: [
+        'http://localhost:5173', // Para funcionar no seu PC local
+        'https://kadilac-frontend.vercel.app/', // COLOQUE AQUI SEU DOMÍNIO DA VERCEL
+        'https://seu-projeto.vercel.app' // Adicione variações se tiver dúvida
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+
 // --- ROTAS DE CLIENTES ---
 
 // Cadastrar Cliente
