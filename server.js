@@ -4,6 +4,11 @@ const pool = require('./db');
 
 const app = express();
 
+// --- CORREÇÃO DO ERRO 413 AQUI ---
+// Aumenta o limite para aceitar fotos grandes (até 50MB)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 // Middlewares
 app.use(cors()); // Permite que o Frontend acesse o Backend
 app.use(express.json()); // Permite ler JSON no corpo das requisições
@@ -99,37 +104,72 @@ app.delete('/clientes/:id', async (req, res) => {
     res.status(500).send('Erro no servidor');
   }
 });
-// --- ATUALIZAÇÕES PARA VEÍCULOS ---
+// --- ROTAS DE VEÍCULOS ATUALIZADAS ---
 
-// Editar Veículo (ou Fechar Ficha/Vender)
+// 1. CADASTRAR VEÍCULO (POST)
+app.post('/veiculos', async (req, res) => {
+  try {
+    // Recebe os dados do Frontend (nomes em camelCase)
+    const { 
+      modelo, placa, ano, cor, combustivel, valor, custo, 
+      dataEntrada, // Frontend envia assim
+      operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, 
+      foto // Novo campo da foto
+    } = req.body;
+
+    const newVehicle = await pool.query(
+      `INSERT INTO veiculos (
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        data_entrada, operacao, proprietario_anterior, vendedor, 
+        renavam, chassi, opcionais, observacoes, status, foto
+      ) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
+       RETURNING *`,
+      [
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        dataEntrada, // Mapeado para data_entrada
+        operacao, proprietario, vendedor, 
+        renavam, chassi, opcionais, observacoes, status, foto
+      ]
+    );
+
+    res.json(newVehicle.rows[0]);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Erro ao cadastrar veículo');
+  }
+});
+
+// 2. EDITAR VEÍCULO (PUT)
 app.put('/veiculos/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { modelo, placa, ano, cor, combustivel, valor, custo, data_entrada, operacao, proprietario_anterior, vendedor, renavam, chassi, opcionais, observacoes, status } = req.body;
+    const { 
+      modelo, placa, ano, cor, combustivel, valor, custo, 
+      dataEntrada, // Frontend envia assim
+      operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, 
+      foto 
+    } = req.body;
     
     await pool.query(
-      `UPDATE veiculos SET modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, valor=$6, custo=$7, data_entrada=$8, operacao=$9, proprietario_anterior=$10, vendedor=$11, renavam=$12, chassi=$13, opcionais=$14, observacoes=$15, status=$16 WHERE id=$17`,
-      [modelo, placa, ano, cor, combustivel, valor, custo, data_entrada, operacao, proprietario_anterior, vendedor, renavam, chassi, opcionais, observacoes, status, id]
+      `UPDATE veiculos SET 
+        modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, valor=$6, custo=$7, 
+        data_entrada=$8, operacao=$9, proprietario_anterior=$10, vendedor=$11, 
+        renavam=$12, chassi=$13, opcionais=$14, observacoes=$15, status=$16, foto=$17 
+       WHERE id=$18`,
+      [
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        dataEntrada, // Mapeado corretamente
+        operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, foto, 
+        id
+      ]
     );
-    res.json({ message: "Veículo atualizado" });
+    res.json({ message: "Veículo atualizado com sucesso!" });
   } catch (err) {
     console.error(err.message);
-    res.status(500).send('Erro no servidor');
+    res.status(500).send('Erro ao atualizar veículo');
   }
 });
-
-// Excluir Veículo
-app.delete('/veiculos/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query('DELETE FROM veiculos WHERE id = $1', [id]);
-    res.json({ message: "Veículo excluído" });
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Erro no servidor');
-  }
-});
-
 
 // --- ROTA DO DASHBOARD ---
 
