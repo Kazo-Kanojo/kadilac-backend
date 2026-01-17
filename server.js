@@ -64,6 +64,37 @@ app.post('/veiculos', async (req, res) => {
   }
 });
 
+app.put('/veiculos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      modelo, placa, ano, cor, combustivel, valor, custo, 
+      dataEntrada, // O Frontend manda como dataEntrada
+      operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, 
+      foto 
+    } = req.body;
+    
+    // ATENÇÃO: Aqui tem que ser UPDATE, não INSERT
+    await pool.query(
+      `UPDATE veiculos SET 
+        modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, valor=$6, custo=$7, 
+        data_entrada=$8, operacao=$9, proprietario_anterior=$10, vendedor=$11, 
+        renavam=$12, chassi=$13, opcionais=$14, observacoes=$15, status=$16, foto=$17 
+       WHERE id=$18`,
+      [
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        dataEntrada, 
+        operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, foto, 
+        id
+      ]
+    );
+    res.json({ message: "Veículo atualizado com sucesso!" });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Erro ao atualizar veículo');
+  }
+});
+
 // Listar Todos os Veículos
 app.get('/veiculos', async (req, res) => {
   try {
