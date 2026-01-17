@@ -129,6 +129,48 @@ app.delete('/veiculos/:id', async (req, res) => {
     res.status(500).send('Erro no servidor');
   }
 });
+
+
+// --- ROTA DO DASHBOARD ---
+
+app.get('/dashboard/resumo', async (req, res) => {
+  try {
+    // 1. Total e Valor em Estoque
+    const estoque = await pool.query(
+      "SELECT COUNT(*) as qtd, SUM(valor) as total FROM veiculos WHERE status = 'Em estoque'"
+    );
+
+    // 2. Total de Vendas
+    const vendas = await pool.query(
+      "SELECT COUNT(*) as qtd FROM veiculos WHERE status = 'Vendido'"
+    );
+
+    // 3. Total de Clientes
+    const clientes = await pool.query(
+      "SELECT COUNT(*) as qtd FROM clientes"
+    );
+
+    // 4. Últimas 5 Vendas (para a tabela de atividades recentes)
+    const ultimasVendas = await pool.query(
+      "SELECT modelo, placa, valor, proprietario_anterior FROM veiculos WHERE status = 'Vendido' ORDER BY id DESC LIMIT 5"
+    );
+
+    res.json({
+      estoque: {
+        qtd: estoque.rows[0].qtd,
+        valor: estoque.rows[0].total || 0
+      },
+      vendas: vendas.rows[0].qtd,
+      clientes: clientes.rows[0].qtd,
+      recentes: ultimasVendas.rows
+    });
+
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Erro ao buscar dados do dashboard');
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
