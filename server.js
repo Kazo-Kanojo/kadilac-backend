@@ -235,45 +235,204 @@ app.put('/veiculos/:id', async (req, res) => {
   }
 });
 
+
+// --- ROTA DE VENDAS (NOVA FICHA) ---
+
+// 1. Buscar lista de carros APENAS em estoque (para o select)
+app.get('/veiculos-estoque', async (req, res) => {
+    try {
+        const result = await pool.query("SELECT * FROM veiculos WHERE status = 'Em estoque' ORDER BY modelo");
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. Salvar uma nova venda (Ficha)
+app.post('/vendas', async (req, res) => {
+    const { cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes } = req.body;
+    
+    try {
+        // Inicia uma transação (para garantir que tudo ocorra bem ou nada aconteça)
+        await pool.query('BEGIN');
+
+        // A. Cria o registro na tabela de vendas
+        const newSale = await pool.query(
+            `INSERT INTO vendas (cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+            [cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes]
+        );
+
+        // B. Atualiza o status do carro para 'Vendido' automaticamente
+        await pool.query(
+            "UPDATE veiculos SET status = 'Vendido' WHERE id = $1", 
+            [veiculo_id]
+        );
+
+        await pool.query('COMMIT'); // Confirma tudo
+        res.json(newSale.rows[0]);
+
+    } catch (err) {
+        await pool.query('ROLLBACK'); // Desfaz se der erro
+        console.error(err);
+        res.status(500).json({ error: "Erro ao realizar venda" });
+    }
+});
+
+
 // --- ROTA DO DASHBOARD ---
 
 app.get('/dashboard/resumo', async (req, res) => {
-  try {
-    // 1. Total e Valor em Estoque
-    const estoque = await pool.query(
-      "SELECT COUNT(*) as qtd, SUM(valor) as total FROM veiculos WHERE status = 'Em estoque'"
-    );
+    try {
+        // 1. Dados de Estoque (Qtd e Valor Total)
+        const estoqueQuery = await pool.query(
+            "SELECT COUNT(*) as qtd, SUM(valor) as total FROM veiculos WHERE status = 'Em estoque'"
+        );
+        
+        // 2. Total de Vendas
+        const vendasQuery = await pool.query("SELECT COUNT(*) as qtd FROM vendas");
+        
+        // 3. Total de Clientes
+        const clientesQuery = await pool.query("SELECT COUNT(*) as qtd FROM clientes");
 
-    // 2. Total de Vendas
-    const vendas = await pool.query(
-      "SELECT COUNT(*) as qtd FROM veiculos WHERE status = 'Vendido'"
-    );
+        // 4. Últimas 5 Vendas (com dados do carro)
+        const recentesQuery = await pool.query(`
+            SELECT v.modelo, v.placa, s.valor_venda, s.data_venda 
+            FROM vendas s 
+            JOIN veiculos v ON s.veiculo_id = v.id 
+            ORDER BY s.data_venda DESC 
+            LIMIT 5
+        `);
 
-    // 3. Total de Clientes
-    const clientes = await pool.query(
-      "SELECT COUNT(*) as qtd FROM clientes"
-    );
+        res.json({
+            estoque: {
+                qtd: estoqueQuery.rows[0].qtd || 0,
+                valor: estoqueQuery.rows[0].total || 0
+            },
+            vendas: vendasQuery.rows[0].qtd || 0,
+            clientes: clientesQuery.rows[0].qtd || 0,
+            recentes: recentesQuery.rows
+        });
 
-    // 4. Últimas 5 Vendas (para a tabela de atividades recentes)
-    const ultimasVendas = await pool.query(
-      "SELECT modelo, placa, valor, proprietario_anterior FROM veiculos WHERE status = 'Vendido' ORDER BY id DESC LIMIT 5"
-    );
-
-    res.json({
-      estoque: {
-        qtd: estoque.rows[0].qtd,
-        valor: estoque.rows[0].total || 0
-      },
-      vendas: vendas.rows[0].qtd,
-      clientes: clientes.rows[0].qtd,
-      recentes: ultimasVendas.rows
-    });
-
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Erro ao buscar dados do dashboard');
-  }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao carregar dashboard" });
+    }
 });
+
+// --- ROTA DO FINANCEIRO / HISTÓRICO DE VENDAS ---
+app.get('/financeiro/vendas', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                v.id,
+                c.nome as cliente_nome,
+                c.cpf_cnpj,
+                ve.modelo as veiculo_modelo,
+                ve.placa as veiculo_placa,
+                v.valor_venda,
+                v.data_venda,
+                v.metodo_pagamento,
+                v.entrada,
+                v.financiado
+            FROM vendas v
+            JOIN clientes c ON v.cliente_id = c.id
+            JOIN veiculos ve ON v.veiculo_id = ve.id
+            ORDER BY v.data_venda DESC
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar histórico de vendas" });
+    }
+});
+
+// --- ROTA DE CANCELAMENTO DE VENDA ---
+app.delete('/vendas/:id', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        await pool.query('BEGIN'); // Inicia a transação de segurança
+
+        // 1. Descobrir qual carro foi vendido nesta venda antes de apagar
+        const saleResult = await pool.query('SELECT veiculo_id FROM vendas WHERE id = $1', [id]);
+        
+        if (saleResult.rows.length === 0) {
+            await pool.query('ROLLBACK');
+            return res.status(404).json({ error: 'Venda não encontrada' });
+        }
+
+        const veiculoId = saleResult.rows[0].veiculo_id;
+
+        // 2. Apagar o registro da venda
+        await pool.query('DELETE FROM vendas WHERE id = $1', [id]);
+
+        // 3. Atualizar o status do veículo de volta para "Em estoque"
+        await pool.query("UPDATE veiculos SET status = 'Em estoque' WHERE id = $1", [veiculoId]);
+
+        await pool.query('COMMIT'); // Confirma as alterações
+        res.json({ message: 'Venda cancelada e veículo retornado ao estoque.' });
+
+    } catch (err) {
+        await pool.query('ROLLBACK'); // Desfaz tudo se der erro
+        console.error(err);
+        res.status(500).json({ error: 'Erro ao cancelar venda' });
+    }
+});
+
+
+// --- CONFIGURAÇÕES DA LOJA ---
+app.get('/config', async (req, res) => {
+    const result = await pool.query('SELECT * FROM configuracoes WHERE id = 1');
+    res.json(result.rows[0]);
+});
+
+app.put('/config', async (req, res) => {
+    const { nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site } = req.body;
+    await pool.query(
+        `UPDATE configuracoes SET 
+         nome_loja=$1, razao_social=$2, cnpj=$3, endereco=$4, cidade=$5, telefone=$6, email=$7, site=$8 
+         WHERE id=1`,
+        [nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site]
+    );
+    res.json({ message: 'Configurações salvas!' });
+});
+
+// --- DADOS PARA IMPRESSÃO (CONTRATO) ---
+app.get('/vendas/:id/print', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Busca Venda + Cliente Completo + Veículo Completo
+        const vendaQuery = `
+            SELECT 
+                v.*, 
+                c.nome, c.cpf_cnpj, c.rg, c.endereco as cli_endereco, c.cidade as cli_cidade, c.telefone as cli_telefone,
+                ve.modelo, ve.marca, ve.placa, ve.renavam, ve.chassi, ve.ano, ve.cor, ve.combustivel
+            FROM vendas v
+            JOIN clientes c ON v.cliente_id = c.id
+            JOIN veiculos ve ON v.veiculo_id = ve.id
+            WHERE v.id = $1
+        `;
+        const vendaRes = await pool.query(vendaQuery, [id]);
+        
+        // Busca Configurações da Loja
+        const configRes = await pool.query('SELECT * FROM configuracoes WHERE id = 1');
+
+        if (vendaRes.rows.length === 0) return res.status(404).json({ error: 'Venda não encontrada' });
+
+        res.json({
+            venda: vendaRes.rows[0],
+            loja: configRes.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar dados de impressão" });
+    }
+});
+
+
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
