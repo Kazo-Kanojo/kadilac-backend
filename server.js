@@ -152,6 +152,24 @@ app.delete('/clientes/:id', async (req, res) => {
 });
 // --- ROTAS DE VEÍCULOS ATUALIZADAS ---
 
+// Rota para deletar veículo
+app.delete('/veiculos/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Verifica se o ID existe antes de tentar deletar
+    const check = await pool.query('SELECT * FROM veiculos WHERE id = $1', [id]);
+    if (check.rows.length === 0) {
+        return res.status(404).json({ message: 'Veículo não encontrado' });
+    }
+
+    await pool.query('DELETE FROM veiculos WHERE id = $1', [id]);
+    res.status(200).json({ message: 'Veículo deletado com sucesso' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro interno ao deletar veículo' });
+  }
+});
+
 // 1. CADASTRAR VEÍCULO (POST)
 app.post('/veiculos', async (req, res) => {
   try {
