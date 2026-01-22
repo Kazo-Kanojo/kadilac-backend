@@ -59,47 +59,90 @@ app.get('/clientes', async (req, res) => {
   }
 });
 
+// --- ROTA DE HISTÓRICO DO CLIENTE ---
+app.get('/clientes/:id/vendas', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = `
+            SELECT 
+                v.id,
+                v.data_venda,
+                v.valor_venda,
+                v.metodo_pagamento,
+                ve.modelo,
+                ve.placa,
+                ve.ano,
+                ve.cor
+            FROM vendas v
+            JOIN veiculos ve ON v.veiculo_id = ve.id
+            WHERE v.cliente_id = $1
+            ORDER BY v.data_venda DESC
+        `;
+        const result = await pool.query(query, [id]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar histórico de compras" });
+    }
+});
+
 // --- ROTAS DE VEÍCULOS ---
 
 // Cadastrar Veículo
 app.post('/veiculos', async (req, res) => {
   try {
-    const { modelo, placa, ano, cor, combustivel, valor, custo, data_entrada, operacao, proprietario_anterior, vendedor, renavam, chassi, opcionais, observacoes, status } = req.body;
+    const { 
+      modelo, placa, ano, cor, combustivel, valor, custo, 
+      dataEntrada, operacao, proprietario, vendedor, 
+      renavam, chassi, certificado, // <--- ADICIONEI AQUI
+      opcionais, observacoes, status, foto 
+    } = req.body;
 
     const newVehicle = await pool.query(
-      `INSERT INTO veiculos (modelo, placa, ano, cor, combustivel, valor, custo, data_entrada, operacao, proprietario_anterior, vendedor, renavam, chassi, opcionais, observacoes, status) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
-      [modelo, placa, ano, cor, combustivel, valor, custo, data_entrada, operacao, proprietario_anterior, vendedor, renavam, chassi, opcionais, observacoes, status]
+      `INSERT INTO veiculos (
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        data_entrada, operacao, proprietario_anterior, vendedor, 
+        renavam, chassi, certificado, opcionais, observacoes, status, foto
+      ) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) 
+       RETURNING *`,
+      [
+        modelo, placa, ano, cor, combustivel, valor, custo, 
+        dataEntrada, operacao, proprietario, vendedor, 
+        renavam, chassi, certificado, // <--- E AQUI
+        opcionais, observacoes, status, foto
+      ]
     );
 
     res.json(newVehicle.rows[0]);
   } catch (err) {
     console.error(err.message);
-    res.status(500).send('Erro no servidor');
+    res.status(500).send('Erro ao cadastrar veículo');
   }
 });
 
+// 2. EDITAR VEÍCULO (PUT)
 app.put('/veiculos/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { 
       modelo, placa, ano, cor, combustivel, valor, custo, 
-      dataEntrada, // O Frontend manda como dataEntrada
-      operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, 
-      foto 
+      dataEntrada, operacao, proprietario, vendedor, 
+      renavam, chassi, certificado, // <--- ADICIONEI AQUI
+      opcionais, observacoes, status, foto 
     } = req.body;
     
-    // ATENÇÃO: Aqui tem que ser UPDATE, não INSERT
     await pool.query(
       `UPDATE veiculos SET 
         modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, valor=$6, custo=$7, 
         data_entrada=$8, operacao=$9, proprietario_anterior=$10, vendedor=$11, 
-        renavam=$12, chassi=$13, opcionais=$14, observacoes=$15, status=$16, foto=$17 
-       WHERE id=$18`,
+        renavam=$12, chassi=$13, certificado=$14, opcionais=$15, observacoes=$16, status=$17, foto=$18 
+       WHERE id=$19`,
       [
         modelo, placa, ano, cor, combustivel, valor, custo, 
-        dataEntrada, 
-        operacao, proprietario, vendedor, renavam, chassi, opcionais, observacoes, status, foto, 
+        dataEntrada, operacao, proprietario, vendedor, 
+        renavam, chassi, certificado, // <--- E AQUI
+        opcionais, observacoes, status, foto, 
         id
       ]
     );
@@ -154,19 +197,31 @@ app.delete('/clientes/:id', async (req, res) => {
 
 // Rota para deletar veículo
 app.delete('/veiculos/:id', async (req, res) => {
+  const { id } = req.params;
+
   try {
-    const { id } = req.params;
-    // Verifica se o ID existe antes de tentar deletar
-    const check = await pool.query('SELECT * FROM veiculos WHERE id = $1', [id]);
-    if (check.rows.length === 0) {
+    await pool.query('BEGIN');
+
+    await pool.query('DELETE FROM despesas_veiculos WHERE veiculo_id = $1', [id]);
+
+    await pool.query('DELETE FROM vendas WHERE veiculo_id = $1', [id]);
+
+    const result = await pool.query('DELETE FROM veiculos WHERE id = $1 RETURNING *', [id]);
+
+    if (result.rowCount === 0) {
+        await pool.query('ROLLBACK'); // Desfaz se não achou o carro
         return res.status(404).json({ message: 'Veículo não encontrado' });
     }
 
-    await pool.query('DELETE FROM veiculos WHERE id = $1', [id]);
-    res.status(200).json({ message: 'Veículo deletado com sucesso' });
+    // Confirma todas as exclusões
+    await pool.query('COMMIT');
+    
+    res.status(200).json({ message: 'Veículo e todos os dados vinculados foram deletados com sucesso.' });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Erro interno ao deletar veículo' });
+    await pool.query('ROLLBACK'); // Se der erro, desfaz tudo para não estragar o banco
+    console.error("Erro ao deletar veículo:", err.message);
+    res.status(500).json({ message: 'Erro interno ao deletar veículo: ' + err.message });
   }
 });
 
@@ -250,30 +305,30 @@ app.get('/veiculos-estoque', async (req, res) => {
 
 // 2. Salvar uma nova venda (Ficha)
 app.post('/vendas', async (req, res) => {
-    const { cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes } = req.body;
+    // Adicionado 'vendedor' na desestruturação
+    const { cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor } = req.body;
     
     try {
-        // Inicia uma transação (para garantir que tudo ocorra bem ou nada aconteça)
         await pool.query('BEGIN');
 
-        // A. Cria o registro na tabela de vendas
+        // A. Cria o registro na tabela de vendas (INCLUINDO O VENDEDOR)
         const newSale = await pool.query(
-            `INSERT INTO vendas (cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-            [cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes]
+            `INSERT INTO vendas (cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            [cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor]
         );
 
-        // B. Atualiza o status do carro para 'Vendido' automaticamente
+        // B. Atualiza o status do carro para 'Vendido'
         await pool.query(
             "UPDATE veiculos SET status = 'Vendido' WHERE id = $1", 
             [veiculo_id]
         );
 
-        await pool.query('COMMIT'); // Confirma tudo
+        await pool.query('COMMIT');
         res.json(newSale.rows[0]);
 
     } catch (err) {
-        await pool.query('ROLLBACK'); // Desfaz se der erro
+        await pool.query('ROLLBACK');
         console.error(err);
         res.status(500).json({ error: "Erro ao realizar venda" });
     }
@@ -431,7 +486,47 @@ app.get('/vendas/:id/print', async (req, res) => {
     }
 });
 
+// --- ROTAS DE DESPESAS DO VEÍCULO ---
 
+// 1. Listar despesas de um carro
+app.get('/veiculos/:id/despesas', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT * FROM despesas_veiculos WHERE veiculo_id = $1 ORDER BY data_despesa DESC',
+            [id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao buscar despesas" });
+    }
+});
+
+// 2. Adicionar uma nova despesa
+app.post('/veiculos/:id/despesas', async (req, res) => {
+    const { id } = req.params;
+    const { descricao, valor } = req.body;
+    try {
+        const result = await pool.query(
+            'INSERT INTO despesas_veiculos (veiculo_id, descricao, valor) VALUES ($1, $2, $3) RETURNING *',
+            [id, descricao, valor]
+        );
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao salvar despesa" });
+    }
+});
+
+// 3. Deletar uma despesa
+app.delete('/despesas/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        await pool.query('DELETE FROM despesas_veiculos WHERE id = $1', [id]);
+        res.json({ message: "Despesa removida" });
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao remover despesa" });
+    }
+});
 
 
 const PORT = process.env.PORT || 5000;
