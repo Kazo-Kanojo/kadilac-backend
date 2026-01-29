@@ -165,59 +165,91 @@ app.delete('/clientes/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- VEÍCULOS ---
+// --- VEÍCULOS (CORRIGIDO) ---
 
+// ROTA DE CRIAÇÃO (POST)
 app.post('/veiculos', authenticateToken, async (req, res) => {
   try {
     const { 
       modelo, placa, ano, cor, combustivel, valor, custo, 
-      renavam, chassi, opcionais, observacoes, status, foto
+      renavam, chassi, opcionais, observacoes, status, foto,
+      // Novos campos vindos do Frontend
+      dataEntrada, proprietario, certificado, operacao
     } = req.body;
+
+    // Tratamento de data (evita erro se vier vazio)
+    const data_entrada_db = dataEntrada ? dataEntrada : null;
 
     const newVehicle = await pool.query(
       `INSERT INTO vehicles (
         store_id, modelo, placa, ano, cor, combustivel, 
-        preco_venda, preco_compra, renavam, chassi, status, imagem, descricao
+        preco_venda, preco_compra, renavam, chassi, status, 
+        imagem, descricao,
+        data_entrada, proprietario_anterior, certificado, operacao
       ) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
        RETURNING *`,
       [
         req.user.store_id, 
         modelo, placa, ano, cor, combustivel, 
-        valor, custo, renavam, chassi, status || 'Disponível', foto, observacoes
+        valor, custo, renavam, chassi, status || 'Disponível', 
+        foto, observacoes,
+        data_entrada_db, proprietario, certificado, operacao
       ]
     );
 
     res.json(newVehicle.rows[0]);
   } catch (err) {
-    console.error(err.message);
+    console.error("Erro ao cadastrar veículo:", err.message);
     res.status(500).send('Erro ao cadastrar veículo');
   }
 });
 
+// ROTA DE EDIÇÃO (PUT)
 app.put('/veiculos/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { modelo, placa, ano, cor, combustivel, valor, custo, renavam, chassi, status, foto, observacoes } = req.body;
+    const { 
+      modelo, placa, ano, cor, combustivel, valor, custo, 
+      renavam, chassi, status, foto, observacoes,
+      // Novos campos
+      dataEntrada, proprietario, certificado, operacao
+    } = req.body;
     
+    const data_entrada_db = dataEntrada ? dataEntrada : null;
+
     await pool.query(
       `UPDATE vehicles SET 
-        modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, preco_venda=$6, preco_compra=$7, 
-        renavam=$8, chassi=$9, status=$10, imagem=$11, descricao=$12
-       WHERE id=$13 AND store_id=$14`,
-      [modelo, placa, ano, cor, combustivel, valor, custo, renavam, chassi, status, foto, observacoes, id, req.user.store_id]
+        modelo=$1, placa=$2, ano=$3, cor=$4, combustivel=$5, 
+        preco_venda=$6, preco_compra=$7, renavam=$8, chassi=$9, 
+        status=$10, imagem=$11, descricao=$12,
+        data_entrada=$13, proprietario_anterior=$14, certificado=$15, operacao=$16
+       WHERE id=$17 AND store_id=$18`,
+      [
+        modelo, placa, ano, cor, combustivel, 
+        valor, custo, renavam, chassi, 
+        status, foto, observacoes,
+        data_entrada_db, proprietario, certificado, operacao,
+        id, req.user.store_id
+      ]
     );
     res.json({ message: "Veículo atualizado com sucesso!" });
   } catch (err) {
-    console.error(err.message);
+    console.error("Erro ao atualizar veículo:", err.message);
     res.status(500).send('Erro ao atualizar veículo');
   }
 });
 
+// ROTA DE LEITURA (GET) - Adaptada para retornar os nomes certos pro Frontend
 app.get('/veiculos', authenticateToken, async (req, res) => {
   try {
-    // Mapeia os campos do inglês (banco) para o português (frontend espera) se necessário
-    const allVehicles = await pool.query('SELECT *, preco_venda as valor, preco_compra as custo FROM vehicles WHERE store_id = $1 ORDER BY id DESC', [req.user.store_id]);
+    const allVehicles = await pool.query(
+        `SELECT *, 
+        preco_venda as valor, 
+        preco_compra as custo 
+        FROM vehicles WHERE store_id = $1 ORDER BY id DESC`, 
+        [req.user.store_id]
+    );
     res.json(allVehicles.rows);
   } catch (err) {
     console.error(err.message);
@@ -225,6 +257,7 @@ app.get('/veiculos', authenticateToken, async (req, res) => {
   }
 });
 
+// ROTA DE ESTOQUE (Mantida)
 app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     try {
         const result = await pool.query(
@@ -237,11 +270,10 @@ app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     }
 });
 
+// ROTA DE EXCLUSÃO (Mantida)
 app.delete('/veiculos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    // Graças ao ON DELETE CASCADE no banco SaaS, apagar o veículo apaga as despesas automaticamente
-    // Mas vamos manter a lógica de segurança
     const result = await pool.query('DELETE FROM vehicles WHERE id = $1 AND store_id = $2 RETURNING *', [id, req.user.store_id]);
 
     if (result.rowCount === 0) {
