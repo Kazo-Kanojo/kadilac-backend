@@ -19,12 +19,13 @@ const pool = new Pool({
 });
 
 // Aumenta o limite para aceitar fotos grandes (até 50MB)
+// DICA: No futuro, considere usar upload para nuvem (AWS S3/Cloudinary)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Configuração do CORS (Atualize com seu domínio final)
+// Configuração do CORS (Atualize com seu domínio final em produção)
 app.use(cors({
-    origin: '*', // Mude para o domínio do seu frontend em produção
+    origin: '*', // Em produção, troque '*' pelo seu domínio (ex: https://kadilac.vercel.app)
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -54,9 +55,20 @@ app.post('/api/login', async (req, res) => {
 
     const user = result.rows[0];
     
-    // Comparação de senha (Troque por bcrypt.compare em produção)
-    // const validPassword = await bcrypt.compare(password, user.password_hash);
-    const validPassword = password === user.password_hash; // Temporário para seu teste inicial
+    // --- LÓGICA HÍBRIDA DE SENHA (SEGURANÇA + COMPATIBILIDADE) ---
+    // 1. Tenta comparar como se fosse criptografada (Bcrypt)
+    let validPassword = false;
+    try {
+        validPassword = await bcrypt.compare(password, user.password_hash);
+    } catch (e) {
+        // Se der erro no compare, provavelmente não é um hash válido
+    }
+
+    // 2. Se falhar, verifica se é senha simples (para não te bloquear agora)
+    if (!validPassword && password === user.password_hash) {
+        validPassword = true;
+        console.warn(`AVISO: O usuário ${username} está usando senha sem criptografia. Atualize para Bcrypt.`);
+    }
 
     if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
 
@@ -77,6 +89,8 @@ app.post('/api/login', async (req, res) => {
 // ================= ROTAS PROTEGIDAS (SAAS) =================
 // Todas usam 'authenticateToken' e filtram por 'req.user.store_id'
 
+// --- CLIENTES ---
+
 app.post('/clientes', authenticateToken, async (req, res) => {
   try {
     const { 
@@ -85,7 +99,6 @@ app.post('/clientes', authenticateToken, async (req, res) => {
       bairro, cidade, estado 
     } = req.body;
     
-    // Convertendo data vazia para null para não dar erro no banco
     const nascimento = data_nascimento ? data_nascimento : null;
 
     const newClient = await pool.query(
@@ -110,7 +123,6 @@ app.post('/clientes', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE LEITURA (GET) - Mantida igual
 app.get('/clientes', authenticateToken, async (req, res) => {
   try {
     const allClients = await pool.query('SELECT *, cpf as cpf_cnpj FROM clients WHERE store_id = $1 ORDER BY id DESC', [req.user.store_id]);
@@ -121,7 +133,6 @@ app.get('/clientes', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE EDIÇÃO (PUT) - Agora atualiza todos os campos
 app.put('/clientes/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -153,7 +164,6 @@ app.put('/clientes/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE EXCLUSÃO (DELETE) - Mantida igual
 app.delete('/clientes/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -165,19 +175,16 @@ app.delete('/clientes/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- VEÍCULOS (CORRIGIDO) ---
+// --- VEÍCULOS ---
 
-// ROTA DE CRIAÇÃO (POST)
 app.post('/veiculos', authenticateToken, async (req, res) => {
   try {
     const { 
       modelo, placa, ano, cor, combustivel, valor, custo, 
       renavam, chassi, opcionais, observacoes, status, foto,
-      // Novos campos vindos do Frontend
       dataEntrada, proprietario, certificado, operacao
     } = req.body;
 
-    // Tratamento de data (evita erro se vier vazio)
     const data_entrada_db = dataEntrada ? dataEntrada : null;
 
     const newVehicle = await pool.query(
@@ -205,14 +212,12 @@ app.post('/veiculos', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE EDIÇÃO (PUT)
 app.put('/veiculos/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { 
       modelo, placa, ano, cor, combustivel, valor, custo, 
       renavam, chassi, status, foto, observacoes,
-      // Novos campos
       dataEntrada, proprietario, certificado, operacao
     } = req.body;
     
@@ -240,13 +245,10 @@ app.put('/veiculos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE LEITURA (GET) - Adaptada para retornar os nomes certos pro Frontend
 app.get('/veiculos', authenticateToken, async (req, res) => {
   try {
     const allVehicles = await pool.query(
-        `SELECT *, 
-        preco_venda as valor, 
-        preco_compra as custo 
+        `SELECT *, preco_venda as valor, preco_compra as custo 
         FROM vehicles WHERE store_id = $1 ORDER BY id DESC`, 
         [req.user.store_id]
     );
@@ -257,7 +259,6 @@ app.get('/veiculos', authenticateToken, async (req, res) => {
   }
 });
 
-// ROTA DE ESTOQUE (Mantida)
 app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     try {
         const result = await pool.query(
@@ -270,7 +271,6 @@ app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     }
 });
 
-// ROTA DE EXCLUSÃO (Mantida)
 app.delete('/veiculos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
@@ -294,7 +294,7 @@ app.post('/vendas', authenticateToken, async (req, res) => {
     try {
         await pool.query('BEGIN');
 
-        // Cria venda na tabela SALES (SaaS)
+        // Cria venda
         const newSale = await pool.query(
             `INSERT INTO sales (store_id, client_id, vehicle_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
@@ -319,7 +319,6 @@ app.post('/vendas', authenticateToken, async (req, res) => {
 
 app.get('/financeiro/vendas', authenticateToken, async (req, res) => {
     try {
-        // Query adaptada para as tabelas em inglês (sales, clients, vehicles)
         const query = `
             SELECT 
                 s.id, c.nome as cliente_nome, c.cpf,
@@ -339,27 +338,21 @@ app.get('/financeiro/vendas', authenticateToken, async (req, res) => {
     }
 });
 
+/* --- ROTA DE EXCLUSÃO DE VENDAS DESATIVADA POR SEGURANÇA ---
+   (Conforme solicitado para o Financeiro)
+   
 app.delete('/vendas/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
         await pool.query('BEGIN');
-        
-        // Busca a venda para saber qual carro devolver ao estoque
         const saleResult = await pool.query('SELECT vehicle_id FROM sales WHERE id = $1 AND store_id = $2', [id, req.user.store_id]);
-        
         if (saleResult.rows.length === 0) {
             await pool.query('ROLLBACK');
             return res.status(404).json({ error: 'Venda não encontrada' });
         }
-
         const veiculoId = saleResult.rows[0].vehicle_id;
-
-        // Apaga venda
         await pool.query('DELETE FROM sales WHERE id = $1', [id]);
-
-        // Retorna carro ao estoque
         await pool.query("UPDATE vehicles SET status = 'Em estoque' WHERE id = $1", [veiculoId]);
-
         await pool.query('COMMIT');
         res.json({ message: 'Venda cancelada.' });
     } catch (err) {
@@ -368,6 +361,7 @@ app.delete('/vendas/:id', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Erro ao cancelar venda' });
     }
 });
+*/
 
 // --- DASHBOARD ---
 
@@ -442,6 +436,7 @@ app.put('/config', authenticateToken, async (req, res) => {
 
 // --- DESPESAS ---
 
+// Buscar Despesas de um Veículo Específico
 app.get('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
@@ -455,6 +450,7 @@ app.get('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     }
 });
 
+// Salvar Despesa em Veículo
 app.post('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { descricao, valor } = req.body;
@@ -469,6 +465,7 @@ app.post('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     }
 });
 
+// Apagar Despesa
 app.delete('/despesas/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
@@ -476,6 +473,19 @@ app.delete('/despesas/:id', authenticateToken, async (req, res) => {
         res.json({ message: "Despesa removida" });
     } catch (err) {
         res.status(500).json({ error: "Erro ao remover despesa" });
+    }
+});
+
+// Buscar TODAS as despesas (Para o Financeiro Geral)
+app.get('/despesas', authenticateToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM expenses WHERE store_id = $1 ORDER BY data DESC',
+            [req.user.store_id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao buscar despesas gerais" });
     }
 });
 
