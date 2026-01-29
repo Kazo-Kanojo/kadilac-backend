@@ -402,35 +402,83 @@ app.get('/dashboard/resumo', authenticateToken, async (req, res) => {
     }
 });
 
-// --- CONFIGURAÇÕES ---
-
+// --- CONFIGURAÇÕES DA LOJA (ATUALIZADA) ---
 app.get('/config', authenticateToken, async (req, res) => {
-    const result = await pool.query('SELECT *, company_name as nome_loja FROM settings WHERE store_id = $1', [req.user.store_id]);
-    res.json(result.rows[0] || {});
+    try {
+        // CORREÇÃO: Traduzimos os nomes do banco (inglês) para o frontend (português)
+        const query = `
+            SELECT 
+                id,
+                store_id,
+                company_name as nome_loja, 
+                razao_social, 
+                cnpj, 
+                address as endereco, 
+                cidade, 
+                phone as telefone, 
+                email, 
+                website as site,
+                logo 
+            FROM settings 
+            WHERE store_id = $1
+        `;
+        const result = await pool.query(query, [req.user.store_id]);
+        res.json(result.rows[0] || {});
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar configurações" });
+    }
 });
 
 app.put('/config', authenticateToken, async (req, res) => {
-    const { nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site } = req.body;
+    const { nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site, logo } = req.body;
+    
     try {
-        // Verifica se já existe config
         const check = await pool.query('SELECT id FROM settings WHERE store_id = $1', [req.user.store_id]);
         
         if (check.rows.length > 0) {
             await pool.query(
-                `UPDATE settings SET company_name=$1, razao_social=$2, cnpj=$3, address=$4, cidade=$5, phone=$6, email=$7, website=$8 
-                 WHERE store_id=$9`,
-                [nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site, req.user.store_id]
+                `UPDATE settings SET 
+                    company_name=$1, razao_social=$2, cnpj=$3, 
+                    address=$4, cidade=$5, phone=$6, email=$7, website=$8, logo=$9
+                 WHERE store_id=$10`,
+                [nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site, logo, req.user.store_id]
             );
         } else {
             await pool.query(
-                `INSERT INTO settings (store_id, company_name, razao_social, cnpj, address, cidade, phone, email, website) 
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-                [req.user.store_id, nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site]
+                `INSERT INTO settings 
+                    (store_id, company_name, razao_social, cnpj, address, cidade, phone, email, website, logo) 
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                [req.user.store_id, nome_loja, razao_social, cnpj, endereco, cidade, telefone, email, site, logo]
             );
         }
         res.json({ message: 'Configurações salvas!' });
     } catch (err) {
+        console.error(err);
         res.status(500).send(err.message);
+    }
+});
+
+// --- ROTA DE SEGURANÇA (TROCAR SENHA) ---
+app.put('/profile/password', authenticateToken, async (req, res) => {
+    const { newPassword } = req.body;
+    if(!newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres." });
+    }
+
+    try {
+        // Criptografa a nova senha antes de salvar
+        const salt = await bcrypt.genSalt(10);
+        const hash = await bcrypt.hash(newPassword, salt);
+
+        await pool.query(
+            'UPDATE users SET password_hash = $1 WHERE id = $2',
+            [hash, req.user.id]
+        );
+        res.json({ message: "Senha alterada com sucesso!" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao alterar senha" });
     }
 });
 
