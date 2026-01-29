@@ -81,21 +81,31 @@ app.post('/api/login', async (req, res) => {
 
 app.post('/clientes', authenticateToken, async (req, res) => {
   try {
-    const { nome, tipo, cpf_cnpj, rg, data_nascimento, email, telefone, cep, endereco, numero, bairro, cidade, estado } = req.body;
-    
-    // Concatena endereço para simplificar ou mantém estrutura (Adaptado para tabela clients)
-    const enderecoCompleto = `${endereco}, ${numero} - ${bairro}`;
+    const { 
+      nome, tipo, cpf_cnpj, rg, data_nascimento, 
+      email, telefone, cep, endereco, numero, 
+      bairro, cidade, estado 
+    } = req.body;
 
     const newClient = await pool.query(
-      `INSERT INTO clients (store_id, nome, cpf, rg, email, telefone, endereco) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.user.store_id, nome, cpf_cnpj, rg, email, telefone, enderecoCompleto]
+      `INSERT INTO clients (
+          store_id, nome, cpf, rg, data_nascimento, 
+          email, telefone, cep, endereco, numero, 
+          bairro, cidade, estado, tipo
+      ) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+      RETURNING *`,
+      [
+        req.user.store_id, nome, cpf_cnpj, rg, data_nascimento, 
+        email, telefone, cep, endereco, numero, 
+        bairro, cidade, estado, tipo
+      ]
     );
 
     res.json(newClient.rows[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Erro no servidor');
+    console.error("Erro ao cadastrar cliente:", err.message);
+    res.status(500).json({ error: "Erro ao cadastrar cliente. Verifique os dados." });
   }
 });
 
