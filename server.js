@@ -77,8 +77,6 @@ app.post('/api/login', async (req, res) => {
 // ================= ROTAS PROTEGIDAS (SAAS) =================
 // Todas usam 'authenticateToken' e filtram por 'req.user.store_id'
 
-// --- CLIENTES ---
-
 app.post('/clientes', authenticateToken, async (req, res) => {
   try {
     const { 
@@ -86,6 +84,9 @@ app.post('/clientes', authenticateToken, async (req, res) => {
       email, telefone, cep, endereco, numero, 
       bairro, cidade, estado 
     } = req.body;
+    
+    // Convertendo data vazia para null para não dar erro no banco
+    const nascimento = data_nascimento ? data_nascimento : null;
 
     const newClient = await pool.query(
       `INSERT INTO clients (
@@ -96,7 +97,7 @@ app.post('/clientes', authenticateToken, async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
       RETURNING *`,
       [
-        req.user.store_id, nome, cpf_cnpj, rg, data_nascimento, 
+        req.user.store_id, nome, cpf_cnpj, rg, nascimento, 
         email, telefone, cep, endereco, numero, 
         bairro, cidade, estado, tipo
       ]
@@ -105,13 +106,14 @@ app.post('/clientes', authenticateToken, async (req, res) => {
     res.json(newClient.rows[0]);
   } catch (err) {
     console.error("Erro ao cadastrar cliente:", err.message);
-    res.status(500).json({ error: "Erro ao cadastrar cliente. Verifique os dados." });
+    res.status(500).send('Erro no servidor ao criar cliente');
   }
 });
 
+// ROTA DE LEITURA (GET) - Mantida igual
 app.get('/clientes', authenticateToken, async (req, res) => {
   try {
-    const allClients = await pool.query('SELECT * FROM clients WHERE store_id = $1 ORDER BY id DESC', [req.user.store_id]);
+    const allClients = await pool.query('SELECT *, cpf as cpf_cnpj FROM clients WHERE store_id = $1 ORDER BY id DESC', [req.user.store_id]);
     res.json(allClients.rows);
   } catch (err) {
     console.error(err.message);
@@ -119,22 +121,39 @@ app.get('/clientes', authenticateToken, async (req, res) => {
   }
 });
 
+// ROTA DE EDIÇÃO (PUT) - Agora atualiza todos os campos
 app.put('/clientes/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { nome, email, telefone } = req.body; // Simplificado para bater com tabela clients
+    const { 
+      nome, tipo, cpf_cnpj, rg, data_nascimento, 
+      email, telefone, cep, endereco, numero, 
+      bairro, cidade, estado 
+    } = req.body;
+
+    const nascimento = data_nascimento ? data_nascimento : null;
     
     await pool.query(
-      `UPDATE clients SET nome=$1, email=$2, telefone=$3 WHERE id=$4 AND store_id=$5`,
-      [nome, email, telefone, id, req.user.store_id]
+      `UPDATE clients SET 
+          nome=$1, cpf=$2, rg=$3, data_nascimento=$4, 
+          email=$5, telefone=$6, cep=$7, endereco=$8, 
+          numero=$9, bairro=$10, cidade=$11, estado=$12, tipo=$13
+       WHERE id=$14 AND store_id=$15`,
+      [
+        nome, cpf_cnpj, rg, nascimento, 
+        email, telefone, cep, endereco, 
+        numero, bairro, cidade, estado, tipo, 
+        id, req.user.store_id
+      ]
     );
-    res.json({ message: "Cliente atualizado" });
+    res.json({ message: "Cliente atualizado com sucesso" });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Erro no servidor');
+    console.error("Erro ao atualizar:", err.message);
+    res.status(500).send('Erro no servidor ao atualizar');
   }
 });
 
+// ROTA DE EXCLUSÃO (DELETE) - Mantida igual
 app.delete('/clientes/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
