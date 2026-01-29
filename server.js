@@ -47,7 +47,7 @@ const authenticateToken = (req, res, next) => {
 // ================= ROTAS PÚBLICAS =================
 
 // Rota de Login (O porteiro do SaaS)
-app.post('/api/login', async (req, res) => {
+app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
