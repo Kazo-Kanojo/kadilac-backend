@@ -9,7 +9,9 @@ const app = express();
 const port = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'seusegredomuitoseguro123';
 
-// --- CONEXÃO COM O BANCO SAAS ---
+// ==================================================================
+// 1. CONEXÃO COM O BANCO DE DADOS
+// ==================================================================
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
@@ -18,19 +20,26 @@ const pool = new Pool({
   port: process.env.DB_PORT,
 });
 
+// ==================================================================
+// 2. CONFIGURAÇÕES GERAIS (Middlewares)
+// ==================================================================
+
 // Aumenta o limite para aceitar fotos grandes (até 50MB)
-// DICA: No futuro, considere usar upload para nuvem (AWS S3/Cloudinary)
+// Importante para envio de imagens em Base64
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Configuração do CORS (Atualize com seu domínio final em produção)
+// Configuração do CORS (Permite que o Frontend acesse o Backend)
 app.use(cors({
-    origin: '*', // Em produção, troque '*' pelo seu domínio (ex: https://kadilac.vercel.app)
+    origin: '*', // Em produção, troque '*' pelo domínio do Vercel (ex: https://kadilac.vercel.app)
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// --- MIDDLEWARE DE AUTENTICAÇÃO (SEGURANÇA SAAS) ---
+// ==================================================================
+// 3. MIDDLEWARE DE AUTENTICAÇÃO
+// ==================================================================
+// Protege as rotas verificando se existe um Token válido
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -39,14 +48,16 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ error: 'Token inválido' });
-    req.user = user; // Aqui recuperamos o ID da Loja (store_id)
+    req.user = user; // Salva os dados do usuário (id, store_id) na requisição
     next();
   });
 };
 
-// ================= ROTAS PÚBLICAS =================
+// ==================================================================
+// 4. ROTAS PÚBLICAS
+// ==================================================================
 
-// Rota de Login (O porteiro do SaaS)
+// Rota de Login
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -55,24 +66,20 @@ app.post('/login', async (req, res) => {
 
     const user = result.rows[0];
     
-    // --- LÓGICA HÍBRIDA DE SENHA (SEGURANÇA + COMPATIBILIDADE) ---
-    // 1. Tenta comparar como se fosse criptografada (Bcrypt)
+    // Lógica Híbrida: Tenta Bcrypt primeiro, se falhar, tenta senha simples
     let validPassword = false;
     try {
         validPassword = await bcrypt.compare(password, user.password_hash);
-    } catch (e) {
-        // Se der erro no compare, provavelmente não é um hash válido
-    }
+    } catch (e) { /* Ignora erro de hash inválido */ }
 
-    // 2. Se falhar, verifica se é senha simples (para não te bloquear agora)
     if (!validPassword && password === user.password_hash) {
         validPassword = true;
-        console.warn(`AVISO: O usuário ${username} está usando senha sem criptografia. Atualize para Bcrypt.`);
+        console.warn(`AVISO: Usuário ${username} com senha sem criptografia.`);
     }
 
     if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
 
-    // Cria token com store_id
+    // Gera o Token JWT
     const token = jwt.sign(
         { id: user.id, store_id: user.store_id, username: user.username }, 
         JWT_SECRET, 
@@ -86,10 +93,11 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ================= ROTAS PROTEGIDAS (SAAS) =================
-// Todas usam 'authenticateToken' e filtram por 'req.user.store_id'
+// ==================================================================
+// 5. ROTAS PROTEGIDAS (SAAS)
+// ==================================================================
 
-// --- CLIENTES ---
+// --- MÓDULO: CLIENTES ---
 
 app.post('/clientes', authenticateToken, async (req, res) => {
   try {
@@ -175,8 +183,9 @@ app.delete('/clientes/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- VEÍCULOS ---
+// --- MÓDULO: VEÍCULOS (CORREÇÕES APLICADAS AQUI) ---
 
+// Cadastrar Veículo
 app.post('/veiculos', authenticateToken, async (req, res) => {
   try {
     const { 
@@ -187,6 +196,7 @@ app.post('/veiculos', authenticateToken, async (req, res) => {
 
     const data_entrada_db = dataEntrada ? dataEntrada : null;
 
+    // CORREÇÃO 1: Adicionado "imagem as foto" no RETURNING para o frontend ver a imagem logo após salvar
     const newVehicle = await pool.query(
       `INSERT INTO vehicles (
         store_id, modelo, placa, ano, cor, combustivel, 
@@ -195,7 +205,7 @@ app.post('/veiculos', authenticateToken, async (req, res) => {
         data_entrada, proprietario_anterior, certificado, operacao
       ) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
-       RETURNING *`,
+       RETURNING *, imagem as foto`, 
       [
         req.user.store_id, 
         modelo, placa, ano, cor, combustivel, 
@@ -212,6 +222,7 @@ app.post('/veiculos', authenticateToken, async (req, res) => {
   }
 });
 
+// Atualizar Veículo
 app.put('/veiculos/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -245,10 +256,12 @@ app.put('/veiculos/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Listar Todos os Veículos (Admin)
 app.get('/veiculos', authenticateToken, async (req, res) => {
   try {
+    // CORREÇÃO 2: "imagem as foto" adicionado para compatibilidade com o frontend
     const allVehicles = await pool.query(
-        `SELECT *, preco_venda as valor, preco_compra as custo 
+        `SELECT *, preco_venda as valor, preco_compra as custo, imagem as foto 
         FROM vehicles WHERE store_id = $1 ORDER BY id DESC`, 
         [req.user.store_id]
     );
@@ -259,10 +272,12 @@ app.get('/veiculos', authenticateToken, async (req, res) => {
   }
 });
 
+// Listar Veículos em Estoque (Para Venda)
 app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     try {
+        // CORREÇÃO 3: "imagem as foto" adicionado aqui também
         const result = await pool.query(
-            "SELECT *, preco_venda as valor FROM vehicles WHERE status = 'Em estoque' AND store_id = $1 ORDER BY modelo",
+            "SELECT *, preco_venda as valor, imagem as foto FROM vehicles WHERE status = 'Em estoque' AND store_id = $1 ORDER BY modelo",
             [req.user.store_id]
         );
         res.json(result.rows);
@@ -286,37 +301,38 @@ app.delete('/veiculos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- VENDAS ---
+// --- MÓDULO: VENDAS ---
 
 app.post('/vendas', authenticateToken, async (req, res) => {
     const { cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor } = req.body;
     
     try {
-        await pool.query('BEGIN');
+        await pool.query('BEGIN'); // Inicia transação
 
-        // Cria venda
+        // Registra a venda na tabela sales
         const newSale = await pool.query(
             `INSERT INTO sales (store_id, client_id, vehicle_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
             [req.user.store_id, cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor]
         );
 
-        // Atualiza status do veículo
+        // Atualiza status do veículo para 'Vendido'
         await pool.query(
             "UPDATE vehicles SET status = 'Vendido' WHERE id = $1 AND store_id = $2", 
             [veiculo_id, req.user.store_id]
         );
 
-        await pool.query('COMMIT');
+        await pool.query('COMMIT'); // Confirma transação
         res.json(newSale.rows[0]);
 
     } catch (err) {
-        await pool.query('ROLLBACK');
+        await pool.query('ROLLBACK'); // Cancela se der erro
         console.error(err);
         res.status(500).json({ error: "Erro ao realizar venda" });
     }
 });
 
+// Histórico de Vendas
 app.get('/financeiro/vendas', authenticateToken, async (req, res) => {
     try {
         const query = `
@@ -338,32 +354,7 @@ app.get('/financeiro/vendas', authenticateToken, async (req, res) => {
     }
 });
 
-/* --- ROTA DE EXCLUSÃO DE VENDAS DESATIVADA POR SEGURANÇA ---
-   (Conforme solicitado para o Financeiro)
-   
-app.delete('/vendas/:id', authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    try {
-        await pool.query('BEGIN');
-        const saleResult = await pool.query('SELECT vehicle_id FROM sales WHERE id = $1 AND store_id = $2', [id, req.user.store_id]);
-        if (saleResult.rows.length === 0) {
-            await pool.query('ROLLBACK');
-            return res.status(404).json({ error: 'Venda não encontrada' });
-        }
-        const veiculoId = saleResult.rows[0].vehicle_id;
-        await pool.query('DELETE FROM sales WHERE id = $1', [id]);
-        await pool.query("UPDATE vehicles SET status = 'Em estoque' WHERE id = $1", [veiculoId]);
-        await pool.query('COMMIT');
-        res.json({ message: 'Venda cancelada.' });
-    } catch (err) {
-        await pool.query('ROLLBACK');
-        console.error(err);
-        res.status(500).json({ error: 'Erro ao cancelar venda' });
-    }
-});
-*/
-
-// --- DASHBOARD ---
+// --- MÓDULO: DASHBOARD ---
 
 app.get('/dashboard/resumo', authenticateToken, async (req, res) => {
     try {
@@ -402,23 +393,16 @@ app.get('/dashboard/resumo', authenticateToken, async (req, res) => {
     }
 });
 
-// --- CONFIGURAÇÕES DA LOJA (ATUALIZADA) ---
+// --- MÓDULO: CONFIGURAÇÕES ---
+
 app.get('/config', authenticateToken, async (req, res) => {
     try {
-        // CORREÇÃO: Traduzimos os nomes do banco (inglês) para o frontend (português)
         const query = `
             SELECT 
-                id,
-                store_id,
-                company_name as nome_loja, 
-                razao_social, 
-                cnpj, 
-                address as endereco, 
-                cidade, 
-                phone as telefone, 
-                email, 
-                website as site,
-                logo 
+                id, store_id,
+                company_name as nome_loja, razao_social, cnpj, 
+                address as endereco, cidade, phone as telefone, 
+                email, website as site, logo 
             FROM settings 
             WHERE store_id = $1
         `;
@@ -459,7 +443,7 @@ app.put('/config', authenticateToken, async (req, res) => {
     }
 });
 
-// --- ROTA DE SEGURANÇA (TROCAR SENHA) ---
+// Alterar Senha
 app.put('/profile/password', authenticateToken, async (req, res) => {
     const { newPassword } = req.body;
     if(!newPassword || newPassword.length < 6) {
@@ -467,7 +451,6 @@ app.put('/profile/password', authenticateToken, async (req, res) => {
     }
 
     try {
-        // Criptografa a nova senha antes de salvar
         const salt = await bcrypt.genSalt(10);
         const hash = await bcrypt.hash(newPassword, salt);
 
@@ -482,14 +465,14 @@ app.put('/profile/password', authenticateToken, async (req, res) => {
     }
 });
 
-// --- DESPESAS ---
+// --- MÓDULO: DESPESAS ---
 
-// Buscar Despesas de um Veículo Específico
+// Listar despesas de um veículo
 app.get('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
         const result = await pool.query(
-            'SELECT * FROM expenses WHERE vehicle_id = $1 AND store_id = $2 ORDER BY data DESC',
+            'SELECT * FROM expenses WHERE vehicle_id = $1 AND store_id = $2 ORDER BY data_despesa DESC',
             [id, req.user.store_id]
         );
         res.json(result.rows);
@@ -498,7 +481,7 @@ app.get('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     }
 });
 
-// Salvar Despesa em Veículo
+// Salvar despesa
 app.post('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { descricao, valor } = req.body;
@@ -513,7 +496,7 @@ app.post('/veiculos/:id/despesas', authenticateToken, async (req, res) => {
     }
 });
 
-// Apagar Despesa
+// Deletar despesa
 app.delete('/despesas/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
@@ -524,11 +507,11 @@ app.delete('/despesas/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// Buscar TODAS as despesas (Para o Financeiro Geral)
+// Listar todas as despesas (Relatório)
 app.get('/despesas', authenticateToken, async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT * FROM expenses WHERE store_id = $1 ORDER BY data DESC',
+            'SELECT * FROM expenses WHERE store_id = $1 ORDER BY data_despesa DESC',
             [req.user.store_id]
         );
         res.json(result.rows);
@@ -537,9 +520,7 @@ app.get('/despesas', authenticateToken, async (req, res) => {
     }
 });
 
-
-
-// --- DOCUMENTOS DE VEÍCULOS ---
+// --- MÓDULO: DOCUMENTOS DE VEÍCULOS (Novo) ---
 
 // Listar documentos de um veículo
 app.get('/veiculos/:id/documentos', authenticateToken, async (req, res) => {
@@ -561,7 +542,6 @@ app.post('/veiculos/:id/documentos', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { titulo, arquivo, tipo } = req.body;
     
-    // Validação simples para evitar payloads gigantescos que travem o banco
     if (!arquivo) return res.status(400).json({ error: "Arquivo obrigatório" });
 
     try {
@@ -587,7 +567,11 @@ app.delete('/documentos/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// Health check
+// ==================================================================
+// 6. INICIALIZAÇÃO DO SERVIDOR
+// ==================================================================
+
+// Health check (Para verificar se a API está online)
 app.get('/', (req, res) => {
   res.send('API SaaS Kadilac Rodando com Segurança e Multi-loja 🚀');
 });
