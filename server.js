@@ -537,6 +537,56 @@ app.get('/despesas', authenticateToken, async (req, res) => {
     }
 });
 
+
+
+// --- DOCUMENTOS DE VEÍCULOS ---
+
+// Listar documentos de um veículo
+app.get('/veiculos/:id/documentos', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, titulo, tipo, arquivo, created_at FROM vehicle_documents WHERE vehicle_id = $1 AND store_id = $2 ORDER BY created_at DESC',
+            [id, req.user.store_id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar documentos" });
+    }
+});
+
+// Salvar novo documento
+app.post('/veiculos/:id/documentos', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { titulo, arquivo, tipo } = req.body;
+    
+    // Validação simples para evitar payloads gigantescos que travem o banco
+    if (!arquivo) return res.status(400).json({ error: "Arquivo obrigatório" });
+
+    try {
+        await pool.query(
+            'INSERT INTO vehicle_documents (store_id, vehicle_id, titulo, arquivo, tipo) VALUES ($1, $2, $3, $4, $5)',
+            [req.user.store_id, id, titulo, arquivo, tipo]
+        );
+        res.json({ message: "Documento salvo com sucesso" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao salvar documento" });
+    }
+});
+
+// Deletar documento
+app.delete('/documentos/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await pool.query('DELETE FROM vehicle_documents WHERE id = $1 AND store_id = $2', [id, req.user.store_id]);
+        res.json({ message: "Documento removido" });
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao remover documento" });
+    }
+});
+
 // Health check
 app.get('/', (req, res) => {
   res.send('API SaaS Kadilac Rodando com Segurança e Multi-loja 🚀');
