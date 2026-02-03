@@ -259,12 +259,25 @@ app.put('/veiculos/:id', authenticateToken, async (req, res) => {
 // Listar Todos os Veículos (Admin)
 app.get('/veiculos', authenticateToken, async (req, res) => {
   try {
-    // CORREÇÃO 2: "imagem as foto" adicionado para compatibilidade com o frontend
-    const allVehicles = await pool.query(
-        `SELECT *, preco_venda as valor, preco_compra as custo, imagem as foto 
-        FROM vehicles WHERE store_id = $1 ORDER BY id DESC`, 
-        [req.user.store_id]
-    );
+    // JOIN para buscar quem vendeu (sales.vendedor) e quem comprou (clients.nome)
+    // Usamos DISTINCT ON para evitar duplicatas
+    const query = `
+      SELECT DISTINCT ON (v.id) 
+        v.*, 
+        v.preco_venda as valor, 
+        v.preco_compra as custo, 
+        v.imagem as foto,
+        s.vendedor,
+        s.data_venda,
+        c.nome as cliente_nome
+      FROM vehicles v
+      LEFT JOIN sales s ON v.id = s.vehicle_id
+      LEFT JOIN clients c ON s.client_id = c.id
+      WHERE v.store_id = $1
+      ORDER BY v.id DESC, s.data_venda DESC
+    `;
+    
+    const allVehicles = await pool.query(query, [req.user.store_id]);
     res.json(allVehicles.rows);
   } catch (err) {
     console.error(err.message);
@@ -567,9 +580,141 @@ app.delete('/documentos/:id', authenticateToken, async (req, res) => {
     }
 });
 
+
 // ==================================================================
-// 6. INICIALIZAÇÃO DO SERVIDOR
+// 6. ROTAS DO SUPER ADMIN (Gerenciamento de Lojas)
 // ==================================================================
+
+// Middleware: Verifica se é Super Admin
+const requireSuperAdmin = (req, res, next) => {
+    // Verifica se o papel (role) é super_admin. 
+    // Se você não rodou o SQL de update, troque por: if (req.user.username !== 'admin') ...
+    if (req.user.role !== 'super_admin' && req.user.username !== 'admin') { 
+        return res.status(403).json({ error: "Acesso restrito ao Super Admin" });
+    }
+    next();
+};
+
+// Listar todas as lojas (Tenants)
+app.get('/admin/stores', authenticateToken, requireSuperAdmin, async (req, res) => {
+    try {
+        // Busca lojas e tenta descobrir quem é o admin de cada uma (subquery simples)
+        const query = `
+            SELECT s.*, 
+            (SELECT username FROM users WHERE store_id = s.id ORDER BY id ASC LIMIT 1) as admin_username
+            FROM stores s
+            ORDER BY s.id DESC
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao buscar lojas" });
+    }
+});
+
+// Criar Nova Loja (Tenant) + Usuário Admin
+app.post('/admin/stores', authenticateToken, requireSuperAdmin, async (req, res) => {
+    const { name, username, password } = req.body;
+    
+    if (!name || !username || !password) return res.status(400).json({ error: "Dados incompletos" });
+
+    try {
+        await pool.query('BEGIN');
+
+        // 1. Cria a Loja na tabela stores
+        const storeRes = await pool.query(
+            "INSERT INTO stores (name, status) VALUES ($1, 'active') RETURNING id",
+            [name]
+        );
+        const newStoreId = storeRes.rows[0].id;
+
+        // 2. Cria configurações padrão na tabela settings
+        await pool.query(
+            "INSERT INTO settings (store_id, company_name) VALUES ($1, $2)",
+            [newStoreId, name]
+        );
+
+        // 3. Cria o Usuário Admin vinculado a essa loja
+        // (Reutilizando a lógica de senha do seu login atual)
+        let passwordHash = password; 
+        try {
+            const salt = await bcrypt.genSalt(10);
+            passwordHash = await bcrypt.hash(password, salt);
+        } catch(e) {}
+
+        await pool.query(
+            "INSERT INTO users (username, password_hash, store_id, role) VALUES ($1, $2, $3, 'admin')",
+            [username, passwordHash, newStoreId]
+        );
+
+        await pool.query('COMMIT');
+        res.json({ message: "Loja criada com sucesso!", storeId: newStoreId });
+
+    } catch (err) {
+        await pool.query('ROLLBACK');
+        console.error(err);
+        if (err.code === '23505') { // Erro de duplicidade (username unique)
+            return res.status(400).json({ error: "Nome de usuário já existe." });
+        }
+        res.status(500).json({ error: "Erro ao criar loja" });
+    }
+});
+
+// Bloquear/Desbloquear Loja
+app.put('/admin/stores/:id/status', authenticateToken, requireSuperAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body; // 'active' ou 'blocked'
+
+    try {
+        await pool.query("UPDATE stores SET status = $1 WHERE id = $2", [status, id]);
+        res.json({ message: "Status atualizado" });
+    } catch (err) {
+        res.status(500).json({ error: "Erro ao atualizar status" });
+    }
+});
+
+
+app.put('/admin/stores/:id/reset-password', authenticateToken, requireSuperAdmin, async (req, res) => {
+    const { id } = req.params; // ID da loja
+    const { newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: "A nova senha deve ter no mínimo 6 caracteres." });
+    }
+
+    try {
+        // 1. Acha o usuário admin desta loja
+        const userQuery = await pool.query(
+            "SELECT id FROM users WHERE store_id = $1 AND role = 'admin' LIMIT 1", 
+            [id]
+        );
+
+        if (userQuery.rows.length === 0) {
+            return res.status(404).json({ error: "Usuário admin não encontrado para esta loja." });
+        }
+
+        const userId = userQuery.rows[0].id;
+
+        // 2. Gera o Hash
+        const salt = await bcrypt.genSalt(10);
+        const hash = await bcrypt.hash(newPassword, salt);
+
+        // 3. Atualiza
+        await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId]);
+
+        res.json({ message: "Senha da loja alterada com sucesso!" });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Erro ao resetar senha." });
+    }
+});
+
+// ==================================================================
+// 7. INICIALIZAÇÃO DO SERVIDOR
+// ==================================================================
+
 
 // Health check (Para verificar se a API está online)
 app.get('/', (req, res) => {
