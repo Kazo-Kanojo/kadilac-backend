@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5001;
 const JWT_SECRET = process.env.JWT_SECRET || 'seusegredomuitoseguro123';
 
 // ==================================================================
@@ -37,18 +37,36 @@ app.use(cors({
 }));
 
 // ==================================================================
-// 3. MIDDLEWARE DE AUTENTICAÇÃO
+// 3. MIDDLEWARE DE AUTENTICAÇÃO (COM BLOQUEIO DE LOJA)
 // ==================================================================
-// Protege as rotas verificando se existe um Token válido
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) return res.status(401).json({ error: 'Acesso negado. Faça login.' });
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, async (err, user) => {
     if (err) return res.status(403).json({ error: 'Token inválido' });
-    req.user = user; // Salva os dados do usuário (id, store_id) na requisição
+
+    // --- LÓGICA DE BLOQUEIO (SAAS) ---
+    // Se o usuário tem uma loja vinculada (não é Super Admin), verifica o status dela
+    if (user.store_id) {
+        try {
+            const storeRes = await pool.query('SELECT status FROM stores WHERE id = $1', [user.store_id]);
+            
+            // Se a loja não existir ou estiver bloqueada
+            if (storeRes.rows.length === 0 || storeRes.rows[0].status === 'blocked') {
+                return res.status(402).json({ 
+                    error: 'ACESSO SUSPENSO. Sua loja está bloqueada. Contate o suporte.' 
+                });
+            }
+        } catch (dbError) {
+            console.error("Erro ao verificar status da loja:", dbError);
+            return res.status(500).json({ error: 'Erro de verificação de conta.' });
+        }
+    }
+
+    req.user = user; // Salva os dados do usuário
     next();
   });
 };
@@ -72,21 +90,33 @@ app.post('/login', async (req, res) => {
         validPassword = await bcrypt.compare(password, user.password_hash);
     } catch (e) { /* Ignora erro de hash inválido */ }
 
+    // Fallback para senha em texto plano (importante para o admin manual)
     if (!validPassword && password === user.password_hash) {
         validPassword = true;
-        console.warn(`AVISO: Usuário ${username} com senha sem criptografia.`);
     }
 
     if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
 
-    // Gera o Token JWT
+    // --- CORREÇÃO AQUI: INCLUINDO 'role' NO TOKEN ---
     const token = jwt.sign(
-        { id: user.id, store_id: user.store_id, username: user.username }, 
+        { 
+            id: user.id, 
+            store_id: user.store_id, 
+            username: user.username, 
+            role: user.role // <--- ADICIONADO O CARGO AQUI
+        }, 
         JWT_SECRET, 
         { expiresIn: '24h' }
     );
     
-    res.json({ token, username: user.username, store_id: user.store_id });
+    // Retorna também o role para o frontend saber o que mostrar
+    res.json({ 
+        token, 
+        username: user.username, 
+        store_id: user.store_id,
+        role: user.role 
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erro interno no login' });
@@ -104,23 +134,25 @@ app.post('/clientes', authenticateToken, async (req, res) => {
     const { 
       nome, tipo, cpf_cnpj, rg, data_nascimento, 
       email, telefone, cep, endereco, numero, 
-      bairro, cidade, estado 
+      bairro, cidade, estado, categoria // <--- Novo campo recebido
     } = req.body;
     
     const nascimento = data_nascimento ? data_nascimento : null;
+    // Define padrão como 'Cliente' se não vier nada
+    const categoriaFinal = categoria || 'Cliente';
 
     const newClient = await pool.query(
       `INSERT INTO clients (
           store_id, nome, cpf, rg, data_nascimento, 
           email, telefone, cep, endereco, numero, 
-          bairro, cidade, estado, tipo
+          bairro, cidade, estado, tipo, categoria
       ) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) 
       RETURNING *`,
       [
         req.user.store_id, nome, cpf_cnpj, rg, nascimento, 
         email, telefone, cep, endereco, numero, 
-        bairro, cidade, estado, tipo
+        bairro, cidade, estado, tipo, categoriaFinal
       ]
     );
 
@@ -147,7 +179,7 @@ app.put('/clientes/:id', authenticateToken, async (req, res) => {
     const { 
       nome, tipo, cpf_cnpj, rg, data_nascimento, 
       email, telefone, cep, endereco, numero, 
-      bairro, cidade, estado 
+      bairro, cidade, estado, categoria // <--- Novo campo
     } = req.body;
 
     const nascimento = data_nascimento ? data_nascimento : null;
@@ -156,12 +188,12 @@ app.put('/clientes/:id', authenticateToken, async (req, res) => {
       `UPDATE clients SET 
           nome=$1, cpf=$2, rg=$3, data_nascimento=$4, 
           email=$5, telefone=$6, cep=$7, endereco=$8, 
-          numero=$9, bairro=$10, cidade=$11, estado=$12, tipo=$13
-       WHERE id=$14 AND store_id=$15`,
+          numero=$9, bairro=$10, cidade=$11, estado=$12, tipo=$13, categoria=$14
+       WHERE id=$15 AND store_id=$16`,
       [
         nome, cpf_cnpj, rg, nascimento, 
         email, telefone, cep, endereco, 
-        numero, bairro, cidade, estado, tipo, 
+        numero, bairro, cidade, estado, tipo, categoria,
         id, req.user.store_id
       ]
     );
@@ -179,6 +211,28 @@ app.delete('/clientes/:id', authenticateToken, async (req, res) => {
     res.json({ message: "Cliente excluído" });
   } catch (err) {
     console.error(err.message);
+    res.status(500).send('Erro no servidor');
+  }
+});
+
+
+// Rota para buscar o histórico de compras/vendas de um cliente específico
+app.get('/clientes/:id/vendas', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const query = `
+      SELECT 
+        s.id, s.data_venda, s.valor_venda, s.metodo_pagamento,
+        v.modelo, v.placa, v.cor
+      FROM sales s
+      JOIN vehicles v ON s.vehicle_id = v.id
+      WHERE s.client_id = $1 AND s.store_id = $2
+      ORDER BY s.data_venda DESC
+    `;
+    const result = await pool.query(query, [id, req.user.store_id]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erro ao buscar histórico do cliente:", err.message);
     res.status(500).send('Erro no servidor');
   }
 });
@@ -347,18 +401,19 @@ app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     }
 });
 
+// EXCLUIR VEÍCULO
 app.delete('/veiculos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await pool.query('DELETE FROM vehicles WHERE id = $1 AND store_id = $2 RETURNING *', [id, req.user.store_id]);
-
-    if (result.rowCount === 0) {
-        return res.status(404).json({ message: 'Veículo não encontrado ou sem permissão' });
-    }
-    res.status(200).json({ message: 'Veículo deletado com sucesso.' });
+    // Como configuramos o CASCADE no banco, basta deletar o veículo.
+    // O banco apagará automaticamente as despesas, opções e vendas vinculadas.
+    await pool.query('DELETE FROM vehicles WHERE id = $1 AND store_id = $2', [id, req.user.store_id]);
+    
+    res.json({ message: "Veículo excluído com sucesso!" });
   } catch (err) {
-    console.error("Erro ao deletar veículo:", err.message);
-    res.status(500).json({ message: 'Erro interno' });
+    console.error(err.message);
+    // Se ainda der erro, mostra qual é
+    res.status(500).json({ error: "Erro ao excluir veículo. Verifique se há vínculos pendentes.", details: err.message });
   }
 });
 
@@ -496,24 +551,43 @@ app.put('/config', authenticateToken, async (req, res) => {
 
 // Alterar Senha
 app.put('/profile/password', authenticateToken, async (req, res) => {
-    const { newPassword } = req.body;
-    if(!newPassword || newPassword.length < 6) {
-        return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres." });
-    }
+  const { currentPassword, newPassword } = req.body;
+  const userId = req.user.id;
 
+  try {
+    // 1. Busca o usuário atual
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+    const user = result.rows[0];
+
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    // 2. Verifica a senha ATUAL
+    // Lógica híbrida (hash ou texto plano)
+    let validPassword = false;
     try {
-        const salt = await bcrypt.genSalt(10);
-        const hash = await bcrypt.hash(newPassword, salt);
-
-        await pool.query(
-            'UPDATE users SET password_hash = $1 WHERE id = $2',
-            [hash, req.user.id]
-        );
-        res.json({ message: "Senha alterada com sucesso!" });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Erro ao alterar senha" });
+        validPassword = await bcrypt.compare(currentPassword, user.password_hash);
+    } catch (e) {}
+    
+    if (!validPassword && currentPassword === user.password_hash) {
+        validPassword = true;
     }
+
+    if (!validPassword) {
+        return res.status(400).json({ error: 'A senha atual está incorreta.' });
+    }
+
+    // 3. Atualiza para a NOVA senha (criptografada)
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(newPassword, salt);
+
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId]);
+
+    res.json({ message: 'Senha alterada com sucesso!' });
+
+  } catch (err) {
+    console.error("Erro ao trocar senha:", err);
+    res.status(500).json({ error: 'Erro interno ao atualizar senha.' });
+  }
 });
 
 // --- MÓDULO: DESPESAS ---
@@ -695,120 +769,153 @@ const requireSuperAdmin = (req, res, next) => {
     next();
 };
 
-// Listar todas as lojas (Tenants)
-app.get('/admin/stores', authenticateToken, requireSuperAdmin, async (req, res) => {
-    try {
-        // Busca lojas e tenta descobrir quem é o admin de cada uma (subquery simples)
-        const query = `
-            SELECT s.*, 
-            (SELECT username FROM users WHERE store_id = s.id ORDER BY id ASC LIMIT 1) as admin_username
-            FROM stores s
-            ORDER BY s.id DESC
-        `;
-        const result = await pool.query(query);
-        res.json(result.rows);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Erro ao buscar lojas" });
-    }
+// LISTAR TODAS AS LOJAS
+app.get('/admin/stores', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'super_admin' && req.user.username !== 'admin') return res.sendStatus(403);
+  
+  try {
+    const result = await pool.query(`
+      SELECT 
+        s.*, 
+        (SELECT username FROM users WHERE store_id = s.id LIMIT 1) as admin_username 
+      FROM stores s 
+      ORDER BY s.id ASC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).send('Erro ao listar lojas');
+  }
 });
 
-// Criar Nova Loja (Tenant) + Usuário Admin
-app.post('/admin/stores', authenticateToken, requireSuperAdmin, async (req, res) => {
-    const { name, username, password } = req.body;
+// CRIAR NOVA LOJA (TENANT)
+app.post('/admin/stores', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.sendStatus(403);
+  
+  const { name, username, password } = req.body;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Cria a Loja
+    const storeRes = await client.query(
+      'INSERT INTO stores (name, status) VALUES ($1, $2) RETURNING id',
+      [name, 'active']
+    );
+    const storeId = storeRes.rows[0].id;
+
+    // 2. Cria o Usuário Admin vinculado à loja (Hash de senha ou texto plano fallback)
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(password, salt);
+
+    await client.query(
+      'INSERT INTO users (username, password_hash, role, store_id) VALUES ($1, $2, $3, $4)',
+      [username, hash, 'admin', storeId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Loja criada com sucesso', storeId });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    if (err.code === '23505') return res.status(400).json({ error: 'Usuário já existe' });
+    res.status(500).json({ error: 'Erro ao criar loja' });
+  } finally {
+    client.release();
+  }
+});
+
+// ATUALIZAR STATUS (BLOQUEAR / ATIVAR)
+app.put('/admin/stores/:id/status', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'super_admin') return res.sendStatus(403);
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    await pool.query('UPDATE stores SET status = $1 WHERE id = $2', [status, id]);
+    res.json({ message: 'Status atualizado' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar status' });
+  }
+});
+
+// ATUALIZAR DADOS (NOME E USUÁRIO)
+app.put('/admin/stores/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'super_admin' && req.user.username !== 'admin') return res.sendStatus(403);
+  
+  const { id } = req.params;
+  const { name, username } = req.body;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
     
-    if (!name || !username || !password) return res.status(400).json({ error: "Dados incompletos" });
+    // 1. Atualiza a loja
+    await client.query('UPDATE stores SET name = $1 WHERE id = $2', [name, id]);
+    
+    // 2. Tenta atualizar o usuário. 
+    // Se não existir um com role='admin', ele tenta atualizar o primeiro que achar daquela loja
+    const userUpdate = await client.query(
+        `UPDATE users SET username = $1 WHERE store_id = $2 AND (role = 'admin' OR role IS NULL)`, 
+        [username, id]
+    );
 
-    try {
-        await pool.query('BEGIN');
-
-        // 1. Cria a Loja na tabela stores
-        const storeRes = await pool.query(
-            "INSERT INTO stores (name, status) VALUES ($1, 'active') RETURNING id",
-            [name]
-        );
-        const newStoreId = storeRes.rows[0].id;
-
-        // 2. Cria configurações padrão na tabela settings
-        await pool.query(
-            "INSERT INTO settings (store_id, company_name) VALUES ($1, $2)",
-            [newStoreId, name]
-        );
-
-        // 3. Cria o Usuário Admin vinculado a essa loja
-        // (Reutilizando a lógica de senha do seu login atual)
-        let passwordHash = password; 
-        try {
-            const salt = await bcrypt.genSalt(10);
-            passwordHash = await bcrypt.hash(password, salt);
-        } catch(e) {}
-
-        await pool.query(
-            "INSERT INTO users (username, password_hash, store_id, role) VALUES ($1, $2, $3, 'admin')",
-            [username, passwordHash, newStoreId]
-        );
-
-        await pool.query('COMMIT');
-        res.json({ message: "Loja criada com sucesso!", storeId: newStoreId });
-
-    } catch (err) {
-        await pool.query('ROLLBACK');
-        console.error(err);
-        if (err.code === '23505') { // Erro de duplicidade (username unique)
-            return res.status(400).json({ error: "Nome de usuário já existe." });
-        }
-        res.status(500).json({ error: "Erro ao criar loja" });
-    }
-});
-
-// Bloquear/Desbloquear Loja
-app.put('/admin/stores/:id/status', authenticateToken, requireSuperAdmin, async (req, res) => {
-    const { id } = req.params;
-    const { status } = req.body; // 'active' ou 'blocked'
-
-    try {
-        await pool.query("UPDATE stores SET status = $1 WHERE id = $2", [status, id]);
-        res.json({ message: "Status atualizado" });
-    } catch (err) {
-        res.status(500).json({ error: "Erro ao atualizar status" });
-    }
-});
-
-
-app.put('/admin/stores/:id/reset-password', authenticateToken, requireSuperAdmin, async (req, res) => {
-    const { id } = req.params; // ID da loja
-    const { newPassword } = req.body;
-
-    if (!newPassword || newPassword.length < 6) {
-        return res.status(400).json({ error: "A nova senha deve ter no mínimo 6 caracteres." });
-    }
-
-    try {
-        // 1. Acha o usuário admin desta loja
-        const userQuery = await pool.query(
-            "SELECT id FROM users WHERE store_id = $1 AND role = 'admin' LIMIT 1", 
-            [id]
-        );
-
-        if (userQuery.rows.length === 0) {
-            return res.status(404).json({ error: "Usuário admin não encontrado para esta loja." });
-        }
-
-        const userId = userQuery.rows[0].id;
-
-        // 2. Gera o Hash
+    // 3. Se por acaso a loja não tiver NENHUM usuário (erro de integridade), criamos um
+    if (userUpdate.rowCount === 0) {
         const salt = await bcrypt.genSalt(10);
-        const hash = await bcrypt.hash(newPassword, salt);
-
-        // 3. Atualiza
-        await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId]);
-
-        res.json({ message: "Senha da loja alterada com sucesso!" });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Erro ao resetar senha." });
+        const defaultHash = await bcrypt.hash('123456', salt);
+        await client.query(
+            `INSERT INTO users (username, password_hash, role, store_id) VALUES ($1, $2, 'admin', $3)`,
+            [username, defaultHash, id]
+        );
     }
+
+    await client.query('COMMIT');
+    res.json({ message: 'Dados atualizados com sucesso!' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao salvar dados.' });
+  } finally {
+    client.release();
+  }
+});
+
+// --- A ROTA QUE FALTAVA (RESET DE SENHA) ---
+app.put('/admin/stores/:id/reset-password', authenticateToken, async (req, res) => {
+  // Verificação dupla de segurança
+  const isSuperAdmin = req.user.role === 'super_admin' || req.user.username === 'admin';
+  
+  if (!isSuperAdmin) {
+    return res.status(403).json({ error: 'Acesso restrito ao Super Admin' });
+  }
+
+  const storeId = req.params.id; // ID da loja vindo da URL
+  const { newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'A nova senha deve ter pelo menos 6 caracteres.' });
+  }
+
+  try {
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(newPassword, salt);
+
+    // IMPORTANTE: Atualiza o usuário que pertence a ESTA loja e tem cargo de admin
+    const result = await pool.query(
+      `UPDATE users SET password_hash = $1 WHERE store_id = $2 AND role = 'admin'`,
+      [hash, storeId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Nenhum administrador encontrado para esta loja.' });
+    }
+
+    res.json({ message: 'Senha da loja alterada com sucesso!' });
+  } catch (err) {
+    console.error("Erro ao resetar senha via SuperAdmin:", err);
+    res.status(500).json({ error: 'Erro interno ao processar a troca de senha.' });
+  }
 });
 
 // ==================================================================
