@@ -15,7 +15,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'seusegredomuitoseguro123';
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE, // 'kadilac_saas'
+  database: process.env.DB_DATABASE, 
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
 });
