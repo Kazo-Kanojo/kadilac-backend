@@ -372,29 +372,45 @@ app.get('/veiculos', authenticateToken, async (req, res) => {
       SELECT DISTINCT ON (v.id) 
         v.*, 
         v.preco_venda as valor, v.preco_compra as custo, v.imagem as foto,
-        s.vendedor, s.data_venda, s.operacao as operacao_saida, -- <--- Adicionado operacao_saida
+        s.vendedor, s.data_venda, s.operacao as operacao_saida,
         c.nome as cliente_nome,
+        vt.modelo as veiculo_troca,     -- Busca o modelo do carro na troca
+        vt.placa as placa_troca,       -- Busca a placa do carro na troca
+        vt.preco_compra as valor_troca, -- Busca o valor pelo qual o carro de troca entrou
         (SELECT COALESCE(json_agg(json_build_object('id', o.id, 'code', o.code, 'name', o.name)), '[]')
          FROM vehicle_options vo JOIN options o ON vo.option_id = o.id WHERE vo.vehicle_id = v.id) as opcionais
       FROM vehicles v
       LEFT JOIN sales s ON v.id = s.vehicle_id
       LEFT JOIN clients c ON s.client_id = c.id
+      LEFT JOIN vehicles vt ON v.veiculo_troca_id = vt.id -- <--- JOIN adicionado para buscar os dados da troca
       WHERE v.store_id = $1
       ORDER BY v.id DESC, s.data_venda DESC
     `;
     const allVehicles = await pool.query(query, [req.user.store_id]);
     res.json(allVehicles.rows);
-  } catch (err) { res.status(500).send('Erro no servidor'); }
+  } catch (err) { 
+    console.error("Erro ao listar veículos:", err);
+    res.status(500).send('Erro no servidor'); 
+  }
 });
 
-// Listar Veículos em Estoque (Para Venda)
+// Listar Veículos em Estoque (Para Venda e Troca)
 app.get('/veiculos-estoque', authenticateToken, async (req, res) => {
     try {
-        // CORREÇÃO 3: "imagem as foto" adicionado aqui também
-        const result = await pool.query(
-            "SELECT *, preco_venda as valor, imagem as foto FROM vehicles WHERE status = 'Em estoque' AND store_id = $1 ORDER BY modelo",
-            [req.user.store_id]
-        );
+        const query = `
+            SELECT 
+                v.*, 
+                v.preco_venda as valor, 
+                v.imagem as foto,
+                vt.modelo as veiculo_troca,
+                vt.placa as placa_troca,
+                vt.preco_compra as valor_troca
+            FROM vehicles v
+            LEFT JOIN vehicles vt ON v.veiculo_troca_id = vt.id
+            WHERE (v.status = 'Em estoque' OR v.status = 'Disponível') AND v.store_id = $1 
+            ORDER BY v.modelo
+        `;
+        const result = await pool.query(query, [req.user.store_id]);
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -466,8 +482,9 @@ app.get('/dashboard/resumo', authenticateToken, async (req, res) => {
     try {
         const storeId = req.user.store_id;
 
+        // Busca por 'Disponível' ou 'Em estoque'
         const estoqueQuery = await pool.query(
-            "SELECT COUNT(*) as qtd, SUM(preco_venda) as total FROM vehicles WHERE status = 'Em estoque' AND store_id = $1",
+            "SELECT COUNT(*) as qtd, SUM(preco_venda) as total FROM vehicles WHERE (status = 'Em estoque' OR status = 'Disponível') AND store_id = $1",
             [storeId]
         );
         
@@ -485,11 +502,11 @@ app.get('/dashboard/resumo', authenticateToken, async (req, res) => {
 
         res.json({
             estoque: {
-                qtd: estoqueQuery.rows[0].qtd || 0,
-                valor: estoqueQuery.rows[0].total || 0
+                qtd: parseInt(estoqueQuery.rows[0].qtd) || 0,
+                valor: parseFloat(estoqueQuery.rows[0].total) || 0
             },
-            vendas: vendasQuery.rows[0].qtd || 0,
-            clientes: clientesQuery.rows[0].qtd || 0,
+            vendas: parseInt(vendasQuery.rows[0].qtd) || 0,
+            clientes: parseInt(clientesQuery.rows[0].qtd) || 0,
             recentes: recentesQuery.rows
         });
 
