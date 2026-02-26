@@ -4,10 +4,21 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
 const app = express();
 const port = process.env.PORT || 5001;
-const JWT_SECRET = process.env.JWT_SECRET || 'seusegredomuitoseguro123';
+
+// 1. SEGURANÇA CRÍTICA: Trava do JWT_SECRET
+// Se não houver segredo no .env, o servidor deve "crashar" (Fail-Fast)
+// Nunca permita que a aplicação suba com uma chave de texto plano adivinhável.
+if (!process.env.JWT_SECRET) {
+    console.error("⛔ ERRO FATAL DE SEGURANÇA: A variável JWT_SECRET não está definida no ficheiro .env!");
+    console.error("O servidor não pode iniciar sem uma chave criptográfica segura.");
+    process.exit(1); // Desliga a aplicação imediatamente
+}
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // ==================================================================
 // 1. CONEXÃO COM O BANCO DE DADOS
@@ -24,17 +35,49 @@ const pool = new Pool({
 // 2. CONFIGURAÇÕES GERAIS (Middlewares)
 // ==================================================================
 
-// Aumenta o limite para aceitar fotos grandes (até 50MB)
+//AtivaÇÃO DO HELMETF
+app.use(helmet());
+app.disable('x-powered-by');
 // Importante para envio de imagens em Base64
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Limite reduzido para evitar ataques DoS (5MB é um bom limite para APIs REST)
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
 // Configuração do CORS (Permite que o Frontend acesse o Backend)
 app.use(cors({
-    origin: '*', // Em produção, troque '*' pelo domínio do Vercel (ex: https://kadilac.vercel.app)
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`[Segurança] Tentativa de acesso bloqueada pelo CORS. Origem: ${origin}`);
+            callback(new Error('Acesso bloqueado pela política de CORS.'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+const allowedOrigins = [
+    'http://localhost:5175', // vite local 
+    'http://localhost:3000',
+    process.env.FRONTEND_URL // .env
+];
+
+// ==================================================================
+// SEGURANÇA: LIMITADOR DE REQUISIÇÕES (ANTI FORÇA-BRUTA)
+// ==================================================================
+
+// Necessário se a sua API estiver hospedada atrás de um Proxy (Render, VPS Nginx, etc.)
+app.set('trust proxy', 1);
+
+// Limitador estrito para a rota de Login
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // Tempo de bloqueio: 15 minutos
+    max: 10, // Limite de 5 tentativas por IP dentro desses 15 minutos
+    message: { error: 'Muitas tentativas de login falhadas. Por segurança, o seu IP foi bloqueado temporariamente por 15 minutos.' },
+    standardHeaders: true, 
+    legacyHeaders: false,
+});
 
 // ==================================================================
 // 3. MIDDLEWARE DE AUTENTICAÇÃO (COM BLOQUEIO DE LOJA)
@@ -75,41 +118,51 @@ const authenticateToken = (req, res, next) => {
 // 4. ROTAS PÚBLICAS
 // ==================================================================
 
-// Rota de Login
-app.post('/login', async (req, res) => {
+// Rota de Login (COM MIGRAÇÃO SILENCIOSA DE SEGURANÇA)
+app.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
     if (result.rows.length === 0) return res.status(400).json({ error: 'Usuário não encontrado' });
 
     const user = result.rows[0];
-    
-    // Lógica Híbrida: Tenta Bcrypt primeiro, se falhar, tenta senha simples
     let validPassword = false;
+    let legacyPasswordMatch = false;
+
+    // 1. Tenta validar de forma segura usando Bcrypt
     try {
         validPassword = await bcrypt.compare(password, user.password_hash);
-    } catch (e) { /* Ignora erro de hash inválido */ }
+    } catch (e) {
+        // Ignora erro se a string no banco não for um hash válido
+    }
 
-    // Fallback para senha em texto plano (importante para o admin manual)
+    // 2. Se falhar no Bcrypt, verifica se é uma senha legada em texto plano
     if (!validPassword && password === user.password_hash) {
         validPassword = true;
+        legacyPasswordMatch = true; // Marca que este utilizador precisa de atualização
     }
 
     if (!validPassword) return res.status(400).json({ error: 'Senha incorreta' });
 
-    // --- CORREÇÃO AQUI: INCLUINDO 'role' NO TOKEN ---
+    // 3. BARREIRA DE SEGURANÇA: Se entrou com senha de texto plano, converte para Bcrypt agora!
+    if (legacyPasswordMatch) {
+        const salt = await bcrypt.genSalt(10);
+        const newHash = await bcrypt.hash(password, salt);
+        await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, user.id]);
+        console.log(`[Segurança] Senha do utilizador ${username} migrada para Bcrypt com sucesso.`);
+    }
+
     const token = jwt.sign(
         { 
             id: user.id, 
             store_id: user.store_id, 
             username: user.username, 
-            role: user.role // <--- ADICIONADO O CARGO AQUI
+            role: user.role 
         }, 
         JWT_SECRET, 
         { expiresIn: '24h' }
     );
     
-    // Retorna também o role para o frontend saber o que mostrar
     res.json({ 
         token, 
         username: user.username, 
@@ -433,23 +486,47 @@ app.delete('/veiculos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- MÓDULO: VENDAS ---
 
+// --- MÓDULO: VENDAS ---
 app.post('/vendas', authenticateToken, async (req, res) => {
     const { cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor, operacao } = req.body;
     
     try {
         await pool.query('BEGIN');
+
+        // 1. BARREIRA DE SEGURANÇA: Verificar se o veículo e o cliente realmente pertencem à loja do utilizador
+        const verifyQuery = `
+            SELECT 
+                (SELECT count(*) FROM clients WHERE id = $1 AND store_id = $3) as client_exists,
+                (SELECT count(*) FROM vehicles WHERE id = $2 AND store_id = $3) as vehicle_exists
+        `;
+        const verifyRes = await pool.query(verifyQuery, [cliente_id, veiculo_id, req.user.store_id]);
+
+        if (parseInt(verifyRes.rows[0].client_exists) === 0) {
+            await pool.query('ROLLBACK');
+            return res.status(403).json({ error: "Cliente não encontrado ou pertence a outra loja." });
+        }
+
+        if (parseInt(verifyRes.rows[0].vehicle_exists) === 0) {
+            await pool.query('ROLLBACK');
+            return res.status(403).json({ error: "Veículo não encontrado ou pertence a outra loja." });
+        }
+
+        // 2. Inserir a Venda
         const newSale = await pool.query(
             `INSERT INTO sales (store_id, client_id, vehicle_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor, operacao) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
             [req.user.store_id, cliente_id, veiculo_id, valor_venda, entrada, financiado, metodo_pagamento, observacoes, vendedor, operacao || 'Venda']
         );
-        await pool.query("UPDATE vehicles SET status = 'Vendido' WHERE id = $1", [veiculo_id]);
+
+        // 3. CORREÇÃO DA VULNERABILIDADE: Adicionado 'AND store_id = $2' para impedir alteração de veículos de outras lojas
+        await pool.query("UPDATE vehicles SET status = 'Vendido' WHERE id = $1 AND store_id = $2", [veiculo_id, req.user.store_id]);
+        
         await pool.query('COMMIT');
         res.json(newSale.rows[0]);
     } catch (err) {
         await pool.query('ROLLBACK');
+        console.error("Erro na rota de vendas:", err);
         res.status(500).json({ error: "Erro ao realizar venda" });
     }
 });
@@ -567,33 +644,25 @@ app.put('/config', authenticateToken, async (req, res) => {
 });
 
 // Alterar Senha
+// Alterar Senha (AGORA TOTALMENTE RESTRITA AO BCRYPT)
 app.put('/profile/password', authenticateToken, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const userId = req.user.id;
 
   try {
-    // 1. Busca o usuário atual
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
     const user = result.rows[0];
 
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-    // 2. Verifica a senha ATUAL
-    // Lógica híbrida (hash ou texto plano)
-    let validPassword = false;
-    try {
-        validPassword = await bcrypt.compare(currentPassword, user.password_hash);
-    } catch (e) {}
-    
-    if (!validPassword && currentPassword === user.password_hash) {
-        validPassword = true;
-    }
+    // Removemos a brecha. Agora exigimos que a senha atual seja validada apenas via Bcrypt
+    const validPassword = await bcrypt.compare(currentPassword, user.password_hash);
 
     if (!validPassword) {
         return res.status(400).json({ error: 'A senha atual está incorreta.' });
     }
 
-    // 3. Atualiza para a NOVA senha (criptografada)
+    // Atualiza para a NOVA senha (criptografada)
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(newPassword, salt);
 
